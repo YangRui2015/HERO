@@ -40,3 +40,5 @@ HER + Correction:
 python -m  baselines.run  --env=FetchPush-v1 --num_epoch 50 --num_env 12  --n_step 2 --mode correct --cor_rate 1 --log_path=~/logs/FetchPush_env12_nstep_2/ --save_path=~/policies/nstepher_correction/fetchpush/
 ```
 
+## Main Functions
+The main functions of our algorithms are in /baselines/her/her_sampler.py. Names of our main functions are *_sample_nstep_lambda_her_transitions*, *_sample_nstep_dynamic_her_transitions*.
