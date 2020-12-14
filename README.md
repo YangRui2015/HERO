@@ -1,4 +1,4 @@
-# Multi-step HER
+# Bias-reduced Multi-step HER
 Multi-step HER supports multi-step HER and is revised from OpenAI baselines.
 
 ## Installation
