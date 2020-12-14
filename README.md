@@ -1,5 +1,5 @@
 # Bias-reduced Multi-step HER
-Multi-step HER supports multi-step HER and is revised from OpenAI baselines.
+Bias-reduced Multi-step HER is revised from OpenAI baselines and supports vanilla MHER, MHER($\lambda$), Model-based MHER.
 
 ## Installation
 - Install the requirements such as *tensorflow*, *mpi4py* and *mujoco_py* using pip, besides multi-world should be installed from this repo https://github.com/vitchyr/multiworld;
