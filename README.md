@@ -1,5 +1,5 @@
-# Bias-reduced Multi-step HER
-Bias-reduced Multi-step HER is revised from OpenAI baselines and supports vanilla MHER, MHER($\lambda$), Model-based MHER.
+# HERO
+Code for Combining  Hindsight  and  Imagination  in  Multi-goal  ReinforcementLearning。
 
 
 
