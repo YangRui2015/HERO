@@ -60,17 +60,10 @@ DEFAULT_PARAMS = {
     'n_step':3,
     'use_nstep':False,
 
-    # correct n step
-    'use_correct_nstep': False,
-    'cor_rate': 1,
-
-     # lambda n-step
-    'use_lambda_nstep':True,
-    'lamb':0.7,
 
     # dynamic n-step
     'use_dynamic_nstep':False, 
-    'alpha':0.5,
+    'alpha':0.4,
     'dynamic_batchsize':512,  # warm up the dynamic model
     'dynamic_init':500,
 
@@ -98,33 +91,17 @@ def prepare_mode(kwargs):
         mode = kwargs['mode']
         if mode == 'dynamic':
             kwargs['use_dynamic_nstep'] = True
-            kwargs['use_lambda_nstep'] = False
             kwargs['use_nstep'] = False
-            kwargs['use_correct_nstep'] = False 
             kwargs['random_init'] = 500
-        elif mode == 'lambda':
-            kwargs['use_lambda_nstep'] = True
-            kwargs['use_nstep'] = False
-            kwargs['use_dynamic_nstep'] = False
-            kwargs['use_correct_nstep'] = False
-        elif mode == 'correct':
-            kwargs['use_nstep'] = False
-            kwargs['use_lambda_nstep'] = False
-            kwargs['use_dynamic_nstep'] = False
-            kwargs['use_correct_nstep'] = True
         elif mode == 'nstep':
             kwargs['use_nstep'] = True
             kwargs['use_dynamic_nstep'] = False
-            kwargs['use_lambda_nstep'] = False
-            kwargs['use_correct_nstep'] = False
         else:
             logger.log('No such mode!')
             raise NotImplementedError()
     else:
         kwargs['use_nstep'] = False
         kwargs['use_dynamic_nstep'] = False
-        kwargs['use_lambda_nstep'] = False
-        kwargs['use_correct_nstep'] = False
         kwargs['n_step'] = 1
 
     return kwargs
@@ -188,8 +165,8 @@ def prepare_params(kwargs):
         del kwargs['lr']
     for name in ['buffer_size', 'hidden', 'layers','network_class','polyak','batch_size', 
                  'Q_lr', 'pi_lr', 'norm_eps', 'norm_clip', 'max_u','action_l2', 'clip_obs', 
-                 'scope', 'relative_goals','use_nstep', 'n_step', 'lamb', 'use_dynamic_nstep', 
-                 'use_lambda_nstep', 'alpha', 'dynamic_init', 'dynamic_batchsize','use_correct_nstep', 'cor_rate']:
+                 'scope', 'relative_goals','use_nstep', 'n_step', 'use_dynamic_nstep', 
+                 'alpha', 'dynamic_init', 'dynamic_batchsize']:
         ddpg_params[name] = kwargs[name]
         kwargs['_' + name] = kwargs[name]
         del kwargs[name]
@@ -222,15 +199,12 @@ def configure_her(params):
         params['_' + name] = her_params[name]
         del params[name]
 
-    sample_her, sample_nstep_her, sample_nstep_correct_her, sample_nstep_lambda_her, sample_nstep_dynamic_her = \
-            make_sample_her_transitions(**her_params)
+    sample_her, sample_nstep_her, sample_nstep_dynamic_her = make_sample_her_transitions(**her_params)
     random_sampler = make_random_sample(her_params['reward_fun'])
     samplers = {
         'her': sample_her,
         'random': random_sampler,
         'nstep':sample_nstep_her,
-        'correct': sample_nstep_correct_her,
-        'lambda':sample_nstep_lambda_her,
         'dynamic':sample_nstep_dynamic_her
     }
     return samplers, reward_fun
@@ -258,8 +232,6 @@ def configure_ddpg(dims, params, reuse=False, use_mpi=True, clip_return=True):
                         'sample_transitions': samplers['her'],
                         'random_sampler':samplers['random'],
                         'nstep_sampler':samplers['nstep'],
-                        'nstep_correct_sampler': samplers['correct'],
-                        'nstep_lambda_sampler':samplers['lambda'],
                         'nstep_dynamic_sampler':samplers['dynamic'],
                         'gamma': params['gamma'],
                         })

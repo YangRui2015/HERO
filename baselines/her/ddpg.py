@@ -24,9 +24,8 @@ class DDPG(object):
     def __init__(self, input_dims, buffer_size, hidden, layers, network_class, polyak, batch_size,
                  Q_lr, pi_lr, norm_eps, norm_clip, max_u, action_l2, clip_obs, scope, T,
                  rollout_batch_size, subtract_goals, relative_goals, clip_pos_returns, clip_return,
-                 sample_transitions, random_sampler, gamma, use_nstep, n_step, nstep_sampler, use_correct_nstep,
-                 cor_rate, nstep_correct_sampler, use_dynamic_nstep, nstep_dynamic_sampler, 
-                 dynamic_batchsize, dynamic_init, alpha, use_lambda_nstep, nstep_lambda_sampler,lamb,
+                 sample_transitions, random_sampler, gamma, use_nstep, n_step, nstep_sampler, 
+                use_dynamic_nstep, nstep_dynamic_sampler, dynamic_batchsize, dynamic_init, alpha,
                  reuse=False, **kwargs):
         """Implementation of DDPG that is used in combination with Hindsight Experience Replay (HER).
 
@@ -105,26 +104,6 @@ class DDPG(object):
                 'action_fun':self.action_only,
                 'alpha':self.alpha,
                 'use_dynamic_nstep':True
-            }
-        elif self.use_lambda_nstep:
-            sampler = self.nstep_lambda_sampler
-            info = {
-                'nstep':self.n_step,
-                'gamma':self.gamma,
-                'get_Q_pi':self.get_Q_pi,
-                'get_Q':self.get_Q,
-                'lamb':self.lamb,
-                'use_lambda_target':True
-            }
-        elif self.use_correct_nstep:
-            sampler = self.nstep_correct_sampler
-            info = {
-                'nstep':self.n_step,
-                'gamma':self.gamma,
-                'use_correct':True,
-                'get_Q_pi':self.get_Q_pi,
-                'get_Q':self.get_Q,
-                'cor_rate':self.cor_rate
             }
         elif self.use_nstep:
             sampler = self.nstep_sampler
@@ -381,7 +360,7 @@ class DDPG(object):
         # loss functions
         target_Q_pi_tf = self.target.Q_pi_tf
         clip_range = (-self.clip_return, 0. if self.clip_pos_returns else np.inf)
-        if self.use_lambda_nstep or self.use_dynamic_nstep or self.use_correct_nstep or self.use_nstep:
+        if self.use_dynamic_nstep or self.use_nstep:
             target_tf = tf.clip_by_value(batch_tf['r'] , *clip_range)  # lambda target 
         else:
             target_tf = tf.clip_by_value(batch_tf['r'] + self.gamma * target_Q_pi_tf, * clip_range)
