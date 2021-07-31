@@ -1,3 +1,4 @@
+
 from collections import OrderedDict
 
 import numpy as np
@@ -8,7 +9,7 @@ from baselines import logger
 from baselines.her.util import (
     import_function, store_args, flatten_grads, transitions_in_episode_batch, convert_episode_to_batch_major, g_to_ag)
 from baselines.her.normalizer import Normalizer
-from baselines.her.replay_buffer import ReplayBuffer
+from baselines.her.replay_buffer import ReplayBuffer, SimpleReplayBuffer
 from baselines.common.mpi_adam import MpiAdam
 from baselines.common import tf_util
 from baselines.her.dynamics import ForwardDynamics, ForwardDynamicsNumpy
@@ -24,10 +25,9 @@ class DDPG(object):
     def __init__(self, input_dims, buffer_size, hidden, layers, network_class, polyak, batch_size,
                  Q_lr, pi_lr, norm_eps, norm_clip, max_u, action_l2, clip_obs, scope, T,
                  rollout_batch_size, subtract_goals, relative_goals, clip_pos_returns, clip_return,
-                 sample_transitions, random_sampler, gamma, use_nstep, n_step, nstep_sampler, use_correct_nstep,
-                 cor_rate, nstep_correct_sampler, use_dynamic_nstep, nstep_dynamic_sampler, 
-                 dynamic_batchsize, dynamic_init, alpha, use_lambda_nstep, nstep_lambda_sampler,lamb,
-                 reuse=False, **kwargs):
+                 sample_transitions, random_sampler, gamma,  n_step, use_hero, hero_sampler, 
+                 dynamic_batchsize, dynamic_init, alpha, use_mbpo, mbpo_sampler, use_dynamics_weight, 
+                 goal_weight, goal_idx_tuple, use_std, reuse=False, **kwargs):
         """Implementation of DDPG that is used in combination with Hindsight Experience Replay (HER).
 
         Args:
@@ -56,7 +56,6 @@ class DDPG(object):
             sample_transitions (function) function that samples from the replay buffer
             gamma (float): gamma used for Q learning updates
             reuse (boolean): whether or not the networks should be reused
-            use_nstep(boolean):whether or not use n-step boostrapping
             n_steps: number of steps to boostrap the return
         """
         if self.clip_return is None:
@@ -93,10 +92,10 @@ class DDPG(object):
         buffer_shapes = {key: (self.T-1 if key != 'o' else self.T, *input_shapes[key]) for key, val in input_shapes.items()}
         buffer_shapes['g'] = (buffer_shapes['g'][0], self.dimg)
         buffer_shapes['ag'] = (self.T, self.dimg)
+        buffer_shapes.pop('info_is_success')
         buffer_size = (self.buffer_size // self.rollout_batch_size) * self.rollout_batch_size # buffer_size % rollout_batch_size should be zero
-
-        if self.use_dynamic_nstep:
-            sampler = self.nstep_dynamic_sampler
+        if self.use_hero:
+            sampler = self.hero_sampler
             info = {
                 'nstep':self.n_step,
                 'gamma':self.gamma,
@@ -104,41 +103,23 @@ class DDPG(object):
                 'dynamic_model':self.dynamic_model,
                 'action_fun':self.action_only,
                 'alpha':self.alpha,
-                'use_dynamic_nstep':True
+                'use_hero':True,
+                'use_std':self.use_std
             }
-        elif self.use_lambda_nstep:
-            sampler = self.nstep_lambda_sampler
+        elif self.use_mbpo:
+            sampler = self.mbpo_sampler
+            model_buffer = SimpleReplayBuffer(buffer_size, self.dimo, self.dimg, self.dimu)
             info = {
+                'dynamic_model': self.dynamic_model,
+                'action_fun':self.action_only,
                 'nstep':self.n_step,
-                'gamma':self.gamma,
-                'get_Q_pi':self.get_Q_pi,
-                'get_Q':self.get_Q,
-                'lamb':self.lamb,
-                'use_lambda_target':True
-            }
-        elif self.use_correct_nstep:
-            sampler = self.nstep_correct_sampler
-            info = {
-                'nstep':self.n_step,
-                'gamma':self.gamma,
-                'use_correct':True,
-                'get_Q_pi':self.get_Q_pi,
-                'get_Q':self.get_Q,
-                'cor_rate':self.cor_rate
-            }
-        elif self.use_nstep:
-            sampler = self.nstep_sampler
-            info = {
-                'nstep':self.n_step,
-                'gamma':self.gamma,
-                'use_nstep':True,
-                'get_Q_pi':self.get_Q_pi
+                'model_buffer': model_buffer,
             }
         else: 
             sampler = self.sample_transitions
             info = {}
         self.buffer = ReplayBuffer(buffer_shapes, buffer_size, self.T, sampler, info)
-
+        
 
     def _random_action(self, n):
         return np.random.uniform(low=-self.max_u, high=self.max_u, size=(n, self.dimu))
@@ -162,7 +143,7 @@ class DDPG(object):
         o = np.clip(o, -self.clip_obs, self.clip_obs)
         g = np.clip(g, -self.clip_obs, self.clip_obs)
 
-        policy = self.target  #self.target if use_target_net else
+        policy = self.main  #target  #self.target if use_target_net else
         action = self.sess.run(policy.pi_tf, feed_dict={
             policy.o_tf: o.reshape(-1, self.dimo),
             policy.g_tf: g.reshape(-1, self.dimg)
@@ -237,6 +218,18 @@ class DDPG(object):
 
         ret = self.sess.run(policy.Q_tf, feed_dict=feed)
         return ret
+    
+    def train_policy(self, o, g, u):
+        pi_sl_loss, pi_sl_grad = self.sess.run(
+            [self.policy_sl_loss, self.pi_sl_grad_tf],
+            feed_dict={
+                self.main.o_tf: o,
+                self.main.g_tf: g,
+                self.main.u_tf : u
+            }
+        )
+        self.pi_adam.update(pi_sl_grad, self.pi_lr)
+        return pi_sl_loss
 
     def store_episode(self, episode_batch, update_stats=True): #init=False
         """
@@ -263,7 +256,6 @@ class DDPG(object):
             self.u_stats.update(transitions['u'])
             self.u_stats.recompute_stats()
 
-
     def get_current_buffer_size(self):
         return self.buffer.get_current_size()
 
@@ -286,12 +278,17 @@ class DDPG(object):
         self.pi_adam.update(pi_grad, self.pi_lr)
 
     def update_dynamic_model(self, init=False):
-        times = 1
+        times = 4
         if init:
             times = self.dynamic_init
         for _ in range(times):
             transitions = self.buffer.sample(self.dynamic_batchsize)
-            loss = self.dynamic_model.update(transitions['o'], transitions['u'], transitions['o_2'])
+            pred = self.dynamic_model.predict_next_state(transitions['o'], transitions['u'])
+            pred_error = np.abs(transitions['o_2'] - pred)
+            # print(pred_error.sum(axis=1).mean(), pred_error[:,0:3].sum(axis=1).mean())
+            self.dynamic_model.update(transitions['o'], transitions['u'], transitions['o_2'])
+        
+        return pred_error.sum(axis=1).mean(), pred_error[:,self.goal_idx_tuple[0]:self.goal_idx_tuple[1]].sum(axis=1).mean()
 
     def sample_batch(self, method='list'):
         transitions = self.buffer.sample(self.batch_size)   #otherwise only sample from primary buffer
@@ -381,7 +378,7 @@ class DDPG(object):
         # loss functions
         target_Q_pi_tf = self.target.Q_pi_tf
         clip_range = (-self.clip_return, 0. if self.clip_pos_returns else np.inf)
-        if self.use_lambda_nstep or self.use_dynamic_nstep or self.use_correct_nstep or self.use_nstep:
+        if self.use_hero:
             target_tf = tf.clip_by_value(batch_tf['r'] , *clip_range)  # lambda target 
         else:
             target_tf = tf.clip_by_value(batch_tf['r'] + self.gamma * target_Q_pi_tf, * clip_range)
@@ -391,20 +388,29 @@ class DDPG(object):
         self.pi_loss_tf = -tf.reduce_mean(self.main.Q_pi_tf)
         self.pi_loss_tf += self.action_l2 * tf.reduce_mean(tf.square(self.main.pi_tf / self.max_u))
 
+        # training policy with supervised learning (GCSL)
+        self.policy_sl_loss = tf.reduce_mean(tf.square(self.main.u_tf - self.main.pi_tf))  
+
         Q_grads_tf = tf.gradients(self.Q_loss_tf, self._vars('main/Q'))
         pi_grads_tf = tf.gradients(self.pi_loss_tf, self._vars('main/pi'))
+        pi_sl_grads_tf = tf.gradients(self.policy_sl_loss, self._vars('main/pi'))
         assert len(self._vars('main/Q')) == len(Q_grads_tf)
         assert len(self._vars('main/pi')) == len(pi_grads_tf)
+        assert len(self._vars('main/pi')) == len(pi_sl_grads_tf)
         self.Q_grads_vars_tf = zip(Q_grads_tf, self._vars('main/Q'))
         self.pi_grads_vars_tf = zip(pi_grads_tf, self._vars('main/pi'))
         self.Q_grad_tf = flatten_grads(grads=Q_grads_tf, var_list=self._vars('main/Q'))
         self.pi_grad_tf = flatten_grads(grads=pi_grads_tf, var_list=self._vars('main/pi'))
+        self.pi_sl_grad_tf = flatten_grads(grads=pi_sl_grads_tf, var_list=self._vars('main/pi'))
 
         # optimizers
         self.Q_adam = MpiAdam(self._vars('main/Q'), scale_grad_by_procs=False)
         self.pi_adam = MpiAdam(self._vars('main/pi'), scale_grad_by_procs=False)
-
-        self.dynamic_model = ForwardDynamicsNumpy(self.dimo, self.dimu)
+        
+        if not self.use_dynamics_weight:
+            self.dynamic_model = ForwardDynamicsNumpy(self.dimo, self.dimu)
+        else:
+            self.dynamic_model = ForwardDynamicsNumpy(self.dimo, self.dimu, use_weight=self.use_dynamics_weight, dim_weight=self.get_dynamics_weight())
         # polyak averaging
         self.main_vars = self._vars('main/Q') + self._vars('main/pi')
         self.target_vars = self._vars('target/Q') + self._vars('target/pi')
@@ -419,6 +425,12 @@ class DDPG(object):
         tf.variables_initializer(self._global_vars('')).run()
         self._sync_optimizers()
         self._init_target_net()
+
+    def get_dynamics_weight(self):
+        weight = np.ones(self.dimo)
+        weight[self.goal_idx_tuple[0]:self.goal_idx_tuple[1]] = self.goal_weight
+        return weight
+
 
     def logs(self, prefix=''):
         logs = []

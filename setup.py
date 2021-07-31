@@ -40,10 +40,8 @@ setup(name='baselines',
           'opencv-python'
       ],
       extras_require=extras,
-      description='Multi-step HER supports multi-step HER and is revised from OpenAI baselines.',
+      description='Combining Hindsight and Goal-enhanced Prediction in Multi-goal Reinforcement Learning.',
       author='',
-      url='https://github.com/YangRui2015/Multi-step-HER',
-      author_email='XXX@mails.tsinghua.edu.cn',
       version='0.1')
 
 

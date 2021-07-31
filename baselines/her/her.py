@@ -10,7 +10,7 @@ from baselines.common import set_global_seeds, tf_util
 from baselines.common.mpi_moments import mpi_moments
 import baselines.her.experiment.config as config
 from baselines.her.rollout import RolloutWorker
-from baselines.her.util import dump_params
+from baselines.her.util import dump_params, write_to_file
 
 def mpi_average(value):
     if not isinstance(value, list):
@@ -37,22 +37,22 @@ def train(*, policy, rollout_worker, evaluator,
         for epi in range(int(random_init) // rollout_worker.rollout_batch_size): 
             episode = rollout_worker.generate_rollouts(random_ac=True)
             policy.store_episode(episode)
-        if policy.use_dynamic_nstep and policy.n_step > 1:
-            policy.update_dynamic_model(init=True)
+        if policy.use_hero and policy.n_step > 1:
+            model_loss, model_goal_loss = policy.update_dynamic_model(init=True)
+            write_to_file(str(model_loss) + ' ' + str(model_goal_loss), os.path.join(logger.get_dir(), 'model_error.txt'))
 
     best_success_rate = -1
     logger.info('Start training...')
     # num_timesteps = n_epochs * n_cycles * rollout_length * number of rollout workers
     for epoch in range(n_epochs):
-        # from baselines.her.util import write_to_file
-        # write_to_file('\n epoch: {}'.format(epoch))
         time_start = time.time()
         # train
         rollout_worker.clear_history()
         for i in range(n_cycles):
-            policy.dynamic_batch = False
             episode = rollout_worker.generate_rollouts()
             policy.store_episode(episode)
+            model_loss, model_goal_loss = policy.update_dynamic_model()
+            write_to_file(str(model_loss) + ' ' + str(model_goal_loss), os.path.join(logger.get_dir(), 'model_error.txt'))
             for j in range(n_batches):   
                 policy.train()
             policy.update_target_net()

@@ -1,3 +1,4 @@
+from baselines.her.dynamics import ForwardDynamicsNumpy
 import os
 import numpy as np
 import gym
@@ -6,17 +7,10 @@ from baselines import logger
 from baselines.her.ddpg import DDPG
 from baselines.her.her_sampler import make_sample_her_transitions, make_random_sample, obs_to_goal_fun
 from baselines.bench.monitor import Monitor
-from baselines.her.multi_world_wrapper import PointGoalWrapper, SawyerGoalWrapper
 
 DEFAULT_ENV_PARAMS = {
-    'SawyerReachXYZEnv-v1':{
-        'n_cycles':10,
-    },
-    'SawyerPushAndReachEnvEasy-v0':{
-        'n_cycles':10,
-    },
     'FetchReach-v1': {
-        'n_cycles': 5,  
+        'n_cycles': 10,  
     }
 }
 
@@ -54,25 +48,23 @@ DEFAULT_PARAMS = {
     'norm_clip': 5,  # normalized observations are cropped to this values
 
     # random init episode
-    'random_init':100, # 250
+    'random_init':100, 
 
-    # n step hindsight experience
-    'n_step':3,
-    'use_nstep':False,
+    # MBPO + HER
+    'use_mbpo':False,
+    
+    # HERO
+    # n step 
+    'n_step':2,
+    'use_hero':False, 
+    'alpha':0.4,
+    'dynamic_batchsize':256,  # train the dynamic model
+    'dynamic_init':100,
+    'use_std':False,
 
-    # correct n step
-    'use_correct_nstep': False,
-    'cor_rate': 1,
-
-     # lambda n-step
-    'use_lambda_nstep':True,
-    'lamb':0.7,
-
-    # dynamic n-step
-    'use_dynamic_nstep':False, 
-    'alpha':0.5,
-    'dynamic_batchsize':512,  # warm up the dynamic model
-    'dynamic_init':500,
+    # goal-enhanced predictive model
+    'use_dynamics_weight': False,
+    'goal_weight': 5,  
 
     # if do not use her
     'no_her':False    # no her, will be used for DDPG and n-step  
@@ -96,35 +88,17 @@ def cached_make_env(make_env):
 def prepare_mode(kwargs):
     if 'mode' in kwargs.keys():
         mode = kwargs['mode']
-        if mode == 'dynamic':
-            kwargs['use_dynamic_nstep'] = True
-            kwargs['use_lambda_nstep'] = False
-            kwargs['use_nstep'] = False
-            kwargs['use_correct_nstep'] = False 
-            kwargs['random_init'] = 500
-        elif mode == 'lambda':
-            kwargs['use_lambda_nstep'] = True
-            kwargs['use_nstep'] = False
-            kwargs['use_dynamic_nstep'] = False
-            kwargs['use_correct_nstep'] = False
-        elif mode == 'correct':
-            kwargs['use_nstep'] = False
-            kwargs['use_lambda_nstep'] = False
-            kwargs['use_dynamic_nstep'] = False
-            kwargs['use_correct_nstep'] = True
-        elif mode == 'nstep':
-            kwargs['use_nstep'] = True
-            kwargs['use_dynamic_nstep'] = False
-            kwargs['use_lambda_nstep'] = False
-            kwargs['use_correct_nstep'] = False
+        kwargs['use_hero'] = False
+        kwargs['use_mbpo'] = False
+
+        if mode == 'hero':
+            kwargs['use_hero'] = True
+        elif mode == 'mbpo':
+            kwargs['use_mbpo'] = True
         else:
             logger.log('No such mode!')
             raise NotImplementedError()
     else:
-        kwargs['use_nstep'] = False
-        kwargs['use_dynamic_nstep'] = False
-        kwargs['use_lambda_nstep'] = False
-        kwargs['use_correct_nstep'] = False
         kwargs['n_step'] = 1
 
     return kwargs
@@ -143,12 +117,6 @@ def prepare_params(kwargs):
         except:
             logger.log('Can not make dense reward environment')
             env = gym.make(env_name)
-        # add wrapper for multiworld environment
-        if env_name.startswith('Point2D'):
-            env = PointGoalWrapper(env)
-        elif env_name.startswith('Sawyer') or env_name.startswith('Ant'):
-            env = SawyerGoalWrapper(env)
-
         if (subrank is not None and logger.get_dir() is not None):
             try:
                 from mpi4py import MPI
@@ -167,10 +135,6 @@ def prepare_params(kwargs):
                            allow_early_resets=True)
             # hack to re-expose _max_episode_steps (ideally should replace reliance on it downstream)
             env = gym.wrappers.TimeLimit(env, max_episode_steps=max_episode_steps)
-
-        # if (env_name.startswith('Sawyer') or env_name.startswith('Point2D')) and not hasattr(env, '_max_episode_steps'):
-        #     env = gym.wrappers.TimeLimit(env, max_episode_steps=default_max_episode_steps)
-            
         return env
 
     kwargs['make_env'] = make_env
@@ -188,8 +152,8 @@ def prepare_params(kwargs):
         del kwargs['lr']
     for name in ['buffer_size', 'hidden', 'layers','network_class','polyak','batch_size', 
                  'Q_lr', 'pi_lr', 'norm_eps', 'norm_clip', 'max_u','action_l2', 'clip_obs', 
-                 'scope', 'relative_goals','use_nstep', 'n_step', 'lamb', 'use_dynamic_nstep', 
-                 'use_lambda_nstep', 'alpha', 'dynamic_init', 'dynamic_batchsize','use_correct_nstep', 'cor_rate']:
+                 'scope', 'relative_goals', 'n_step','use_mbpo',  'use_hero', 'alpha', 
+                 'dynamic_init', 'dynamic_batchsize']:
         ddpg_params[name] = kwargs[name]
         kwargs['_' + name] = kwargs[name]
         del kwargs[name]
@@ -222,16 +186,13 @@ def configure_her(params):
         params['_' + name] = her_params[name]
         del params[name]
 
-    sample_her, sample_nstep_her, sample_nstep_correct_her, sample_nstep_lambda_her, sample_nstep_dynamic_her = \
-            make_sample_her_transitions(**her_params)
+    sample_her, sample_hero, sample_mbpo = make_sample_her_transitions(**her_params)
     random_sampler = make_random_sample(her_params['reward_fun'])
     samplers = {
         'her': sample_her,
         'random': random_sampler,
-        'nstep':sample_nstep_her,
-        'correct': sample_nstep_correct_her,
-        'lambda':sample_nstep_lambda_her,
-        'dynamic':sample_nstep_dynamic_her
+        'hero':sample_hero,
+        'mbpo':sample_mbpo
     }
     return samplers, reward_fun
 
@@ -249,6 +210,10 @@ def configure_ddpg(dims, params, reuse=False, use_mpi=True, clip_return=True):
     # DDPG agent
     env = cached_make_env(params['make_env'])
     env.reset()
+    if env.has_object:
+        goal_idx_tuple = [3,6]
+    else:
+        goal_idx_tuple = [0,3]
     ddpg_params.update({'input_dims': input_dims,  # agent takes an input observations
                         'T': params['T'],
                         'clip_pos_returns': True,  # clip positive returns
@@ -257,11 +222,13 @@ def configure_ddpg(dims, params, reuse=False, use_mpi=True, clip_return=True):
                         'subtract_goals': simple_goal_subtract,
                         'sample_transitions': samplers['her'],
                         'random_sampler':samplers['random'],
-                        'nstep_sampler':samplers['nstep'],
-                        'nstep_correct_sampler': samplers['correct'],
-                        'nstep_lambda_sampler':samplers['lambda'],
-                        'nstep_dynamic_sampler':samplers['dynamic'],
+                        'mbpo_sampler':samplers['mbpo'],
+                        'hero_sampler':samplers['hero'],
                         'gamma': params['gamma'],
+                        'use_dynamics_weight':params['use_dynamics_weight'],
+                        'goal_weight':params['goal_weight'],
+                        'goal_idx_tuple': goal_idx_tuple,
+                        'use_std':params['use_std'],
                         })
     ddpg_params['info'] = {
         'env_name': params['env_name'],

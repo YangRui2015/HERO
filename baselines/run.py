@@ -30,13 +30,6 @@ try:
 except ImportError:
     roboschool = None
 
-# support mulitworld
-try:
-    import multiworld
-    multiworld.register_all_envs()
-except ImportError:
-    multiworld = None
-
 _game_envs = defaultdict(set)
 for env in gym.envs.registry.all():
     # TODO: solve this with regexes

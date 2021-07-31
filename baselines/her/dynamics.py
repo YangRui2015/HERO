@@ -109,15 +109,22 @@ class ForwardDynamics:
 # numpy forward dynamics
 class ForwardDynamicsNumpy:
     @store_args
-    def __init__(self, dimo, dimu, clip_norm=5, norm_eps=1e-4, hidden=256, layers=8, learning_rate=1e-3):
+    def __init__(self, dimo, dimu, clip_norm=5, norm_eps=1e-4, hidden=256, layers=5, learning_rate=1e-3, use_weight=False, dim_weight=None):
         self.obs_normalizer = NormalizerNumpy(size=dimo, eps=norm_eps)
         self.action_normalizer = NormalizerNumpy(size=dimu, eps=norm_eps)
         self.sess = U.get_session()
+        self.use_weight = use_weight
+        if self.use_weight and dim_weight is not None:
+            self.dim_weight_init = dim_weight
+        else:
+            self.dim_weight_init = np.ones((1, dimo))
 
         with tf.variable_scope('forward_dynamics_numpy'):
             self.obs0_norm = tf.placeholder(tf.float32, shape=(None,self.dimo) , name='obs0')
             self.obs1_norm = tf.placeholder(tf.float32, shape=(None,self.dimo) , name='obs1')
             self.actions_norm = tf.placeholder(tf.float32, shape=(None,self.dimu) , name='actions')
+            if self.use_weight:
+                self.dim_weight = tf.convert_to_tensor(self.dim_weight_init, dtype=tf.float32)
 
             self.dynamics_scope = tf.get_variable_scope().name
             input = tf.concat(values=[self.obs0_norm, self.actions_norm], axis=-1)
@@ -126,7 +133,10 @@ class ForwardDynamicsNumpy:
 
         # loss functions
         self.per_sample_loss_tf = tf.reduce_mean(tf.abs(self.next_state_diff_tf - self.obs1_norm + self.obs0_norm), axis=1)
-        self.mean_loss_tf = tf.reduce_mean(self.per_sample_loss_tf)
+        if self.use_weight:
+            self.mean_loss_tf = tf.reduce_mean(tf.reduce_mean(tf.abs(self.next_state_diff_tf - self.obs1_norm + self.obs0_norm), axis=0) * self.dim_weight)
+        else:
+            self.mean_loss_tf = tf.reduce_mean(self.per_sample_loss_tf)
         self.dynamics_grads = U.flatgrad(self.mean_loss_tf, _vars(self.dynamics_scope), clip_norm=clip_norm)
 
         # optimizers
@@ -145,11 +155,11 @@ class ForwardDynamicsNumpy:
         obs1_norm = self.obs_normalizer.denormalize(obs1)
         return obs1_norm
     
-    def clip_gauss_noise(self, size):
-        clip_range = 0.002
-        std = 0.001
-        return np.clip(np.random.normal(0, std, size), -clip_range, clip_range)
-        # return 0
+    # def clip_gauss_noise(self, size):
+    #     clip_range = 0.002
+    #     std = 0.001
+    #     return np.clip(np.random.normal(0, std, size), -clip_range, clip_range)
+    # #     return 0
     
     def update(self, obs0, actions, obs1, times=1):
         self.obs_normalizer.update(obs0)
@@ -157,17 +167,17 @@ class ForwardDynamicsNumpy:
         self.action_normalizer.update(actions)
 
         for _ in range(times):
-            obs0_norm = self.obs_normalizer.normalize(obs0) + self.clip_gauss_noise(size=self.dimo)
-            action_norm = self.action_normalizer.normalize(actions) + self.clip_gauss_noise(size=self.dimu)
-            obs1_norm = self.obs_normalizer.normalize(obs1) #+ self.clip_gauss_noise(size=self.dimo)
+            obs0_norm = self.obs_normalizer.normalize(obs0)           #+ self.clip_gauss_noise(obs0.shape)
+            action_norm = self.action_normalizer.normalize(actions) 
+            obs1_norm = self.obs_normalizer.normalize(obs1) 
             
             dynamics_grads, dynamics_loss, dynamics_per_sample_loss = self.sess.run(
                     [self.dynamics_grads, self.mean_loss_tf, self.per_sample_loss_tf],
                     feed_dict={
                         self.obs0_norm: obs0_norm,
                         self.actions_norm: action_norm,
-                        self.obs1_norm: obs1_norm
+                        self.obs1_norm: obs1_norm,
                     })
             self.dynamics_adam.update(dynamics_grads, stepsize=self.learning_rate)
-        return dynamics_loss
+        return dynamics_per_sample_loss
 
